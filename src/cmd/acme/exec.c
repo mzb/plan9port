@@ -92,6 +92,7 @@ static Rune LRedo[] = { 'R', 'e', 'd', 'o', 0 };
 static Rune LSend[] = { 'S', 'e', 'n', 'd', 0 };
 static Rune LSnarf[] = { 'S', 'n', 'a', 'r', 'f', 0 };
 static Rune LSort[] = { 'S', 'o', 'r', 't', 0 };
+static Rune LSpaces[] = { 'S', 'p', 'a', 'c', 'e', 's', 0 };
 static Rune LTab[] = { 'T', 'a', 'b', 0 };
 static Rune LUndo[] = { 'U', 'n', 'd', 'o', 0 };
 static Rune LZerox[] = { 'Z', 'e', 'r', 'o', 'x', 0 };
@@ -109,7 +110,7 @@ Exectab exectab[] = {
 	{ LGet,		get,		FALSE,	TRUE,	XXX		},
 	{ LID,		id,		FALSE,	XXX,		XXX		},
 	{ LIncl,		incl,		FALSE,	XXX,		XXX		},
-	{ LIndent,		indent,	FALSE,	XXX,		XXX		},
+	{ LIndent,	indent,		FALSE,	AUTOINDENT,		XXX		},
 	{ LKill,		xkill,		FALSE,	XXX,		XXX		},
 	{ LLoad,		dump,	FALSE,	FALSE,	XXX		},
 	{ LLocal,		local,	FALSE,	XXX,		XXX		},
@@ -123,6 +124,7 @@ Exectab exectab[] = {
 	{ LSend,		sendx,	TRUE,	XXX,		XXX		},
 	{ LSnarf,		cut,		FALSE,	TRUE,	FALSE	},
 	{ LSort,		sort,		FALSE,	XXX,		XXX		},
+	{ LSpaces,	indent,		FALSE,	SPACESINDENT,	XXX		},
 	{ LTab,		tab,		FALSE,	XXX,		XXX		},
 	{ LUndo,		undo,	FALSE,	TRUE,	XXX		},
 	{ LZerox,		zeroxx,	FALSE,	XXX,		XXX		},
@@ -692,42 +694,69 @@ checksha1(char *name, File *f, Dir *d)
 	}
 }
 
-static uint
-trimspaces(Rune *r, uint *np, int eof)
+static void
+trimspaces(Text *et)
 {
-	uint i, w, nonspace, n;
-	Rune c;
+	File *f;
+	Rune *r;
+	Text *t;
+	uint q0, n, delstart;
+	int c, i, marked;
 
-	nonspace = 0;
-	w = 0;
-	n = *np;
-	for(i=0; i<n; i++) {
-		c = r[i];
-		if(c == '\n')
-			w = nonspace;
-		r[w++] = c;
-		if(c != ' ' && c != '\t')
-			nonspace = w;
+	t = &et->w->body;
+	f = t->file;
+	marked = 0;
+
+	if(t->w!=nil && et->w!=t->w){
+		/* can this happen when t == &et->w->body? */
+		c = 'M';
+		if(et->w)
+			c = et->w->owner;
+		winlock(t->w, c);
 	}
-	if(nonspace > 0 && nonspace < w) {
-		// Trailing spaces at end of buffer.
-		// Tell caller to reread them with what follows,
-		// so we can determine whether they need trimming.
-		// Unless the trailing spaces are the entire buffer,
-		// in which case let them through to avoid an infinite loop
-		// if an entire buffer fills with spaces.
-		// At EOF, just consume the spaces.
-		if(!eof)
-			*np = n - (w - nonspace);
-		w = nonspace;
+
+	r = fbufalloc();
+	q0 = f->b.nc;
+	delstart = q0; /* end of current space run, or 0 if no active run; = q0 to delete spaces before EOF */
+	while(q0 > 0) {
+		n = RBUFSIZE;
+		if(n > q0)
+			n = q0;
+		q0 -= n;
+		bufread(&f->b, q0, r, n);
+		for(i=n; ; i--) {
+			if(i == 0 || (r[i-1] != ' ' && r[i-1] != '\t')) {
+				// Found non-space or start of buffer. Delete active space run.
+				if(q0+i < delstart) {
+					if(!marked) {
+						marked = 1;
+						seq++;
+						filemark(f);
+					}
+					textdelete(t, q0+i, delstart, TRUE);
+				}
+				if(i == 0) {
+					/* keep run active into tail of next buffer */
+					if(delstart > 0)
+						delstart = q0;
+					break;
+				}
+				delstart = 0;
+				if(r[i-1] == '\n')
+					delstart = q0+i-1; /* delete spaces before this newline */
+			}
+		}
 	}
-	return w;
+	fbuffree(r);
+
+	if(t->w!=nil && et->w!=t->w)
+		winunlock(t->w);
 }
 
 void
 putfile(File *f, int q0, int q1, Rune *namer, int nname)
 {
-	uint n, nn, m;
+	uint n, m;
 	Rune *r;
 	Biobuf *b;
 	char *s, *name;
@@ -754,6 +783,7 @@ putfile(File *f, int q0, int q1, Rune *namer, int nname)
 			goto Rescue1;
 		}
 	}
+
 	fd = create(name, OWRITE, 0666);
 	if(fd < 0){
 		warning(nil, "can't create file %s: %r\n", name);
@@ -782,14 +812,7 @@ putfile(File *f, int q0, int q1, Rune *namer, int nname)
 		if(n > BUFSIZE/UTFmax)
 			n = BUFSIZE/UTFmax;
 		bufread(&f->b, q, r, n);
-		nn = n;
-		// An attempt at automatically trimming trailing spaces.
-		// Breaks programs that inspect body file and think it will match on-disk file
-		// when window is clean. Should apply the changes to the actual window instead.
-		// Later.
-		if(0 && w->autoindent)
-			nn = trimspaces(r, &n, q+n==q1);
-		m = snprint(s, BUFSIZE+1, "%.*S", nn, r);
+		m = snprint(s, BUFSIZE+1, "%.*S", n, r);
 		sha1((uchar*)s, m, nil, h);
 		if(Bwrite(b, s, m) != m){
 			warning(nil, "can't write file %s: %r\n", name);
@@ -890,6 +913,8 @@ put(Text *et, Text *_0, Text *argt, int _1, int _2, Rune *arg, int narg)
 		warning(nil, "no file name\n");
 		return;
 	}
+	if(w->indent[AUTOINDENT])
+		trimspaces(et);
 	namer = bytetorune(name, &nname);
 	putfile(f, 0, f->b.nc, namer, nname);
 	xfidlog(w, "put");
@@ -1360,66 +1385,75 @@ incl(Text *et, Text *_0, Text *argt, int _1, int _2, Rune *arg, int narg)
 static Rune LON[] = { 'O', 'N', 0 };
 static Rune LOFF[] = { 'O', 'F', 'F', 0 };
 static Rune Lon[] = { 'o', 'n', 0 };
+static Rune Loff[] = { 'o', 'f', 'f', 0 };
 
 enum {
 	IGlobal = -2,
 	IError = -1,
-	Ion = 0,
-	Ioff = 1
 };
 
 static int
-indentval(Rune *s, int n)
+indentval(Rune *s, int n, int type)
 {
+	static char *strs[] = {
+		[SPACESINDENT] = "Spaces",
+		[AUTOINDENT] = "Indent",
+	};
+
 	if(n < 2)
 		return IError;
 	if(runestrncmp(s, LON, n) == 0){
-		globalautoindent = TRUE;
-		warning(nil, "Indent ON\n");
+		globalindent[type] = TRUE;
+		warning(nil, "%s ON\n", strs[type]);
 		return IGlobal;
 	}
 	if(runestrncmp(s, LOFF, n) == 0){
-		globalautoindent = FALSE;
-		warning(nil, "Indent OFF\n");
+		globalindent[type] = FALSE;
+		warning(nil, "%s OFF\n", strs[type]);
 		return IGlobal;
 	}
-	return runestrncmp(s, Lon, n) == 0;
+	if(runestrncmp(s, Lon, n) == 0)
+		return TRUE;
+	if(runestrncmp(s, Loff, n) == 0)
+		return FALSE;
+	return IError;
 }
 
 static void
 fixindent(Window *w, void *arg)
 {
-	USED(arg);
-	w->autoindent = globalautoindent;
+	int t;
+
+	t = (int)arg;
+	w->indent[t] = globalindent[t];
 }
 
 void
-indent(Text *et, Text *_0, Text *argt, int _1, int _2, Rune *arg, int narg)
+indent(Text *et, Text* _0, Text *argt, int type, int _1, Rune *arg, int narg)
 {
 	Rune *a, *r;
 	Window *w;
-	int na, len, autoindent;
+	int na, len, ival;
 
 	USED(_0);
 	USED(_1);
-	USED(_2);
 
 	w = nil;
 	if(et!=nil && et->w!=nil)
 		w = et->w;
-	autoindent = IError;
+	ival = IError;
 	getarg(argt, FALSE, TRUE, &r, &len);
 	if(r!=nil && len>0)
-		autoindent = indentval(r, len);
+		ival = indentval(r, len, type);
 	else{
 		a = findbl(arg, narg, &na);
 		if(a != arg)
-			autoindent = indentval(arg, narg-na);
+			ival = indentval(arg, narg-na, type);
 	}
-	if(autoindent == IGlobal)
-		allwindows(fixindent, nil);
-	else if(w != nil && autoindent >= 0)
-		w->autoindent = autoindent;
+	if(ival == IGlobal)
+		allwindows(fixindent, (void*)type);
+	else if(w != nil && ival >= 0)
+		w->indent[type] = ival;
 }
 
 void
