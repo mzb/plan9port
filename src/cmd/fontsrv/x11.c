@@ -61,6 +61,7 @@ load(XFont *f)
 	FT_Error e;
 	FT_ULong charcode;
 	FT_UInt glyph_index;
+	int i;
 
 	if(f->loaded)
 		return;
@@ -78,27 +79,30 @@ load(XFont *f)
 	}
 	f->unit = face->units_per_EM;
 	f->height = (int)((face->ascender - face->descender) * 1.35);
-	f->originy = face->descender; // bbox.yMin (or descender)  is negative, becase the baseline is y-coord 0
+	f->originy = face->descender * 1.35; // bbox.yMin (or descender)  is negative, because the baseline is y-coord 0
 
 	for(charcode=FT_Get_First_Char(face, &glyph_index); glyph_index != 0;
 		charcode=FT_Get_Next_Char(face, charcode, &glyph_index)) {
 
 		int idx = charcode/SubfontSize;
 
-		if(charcode > 0xffff)
+		if(charcode > Runemax)
 			break;
 
-		if(!f->range[idx]) {
+		if(!f->range[idx])
 			f->range[idx] = 1;
-			f->nrange++;
-		}
-	}
-	// libdraw expects U+0000 to be present
-	if(!f->range[0]) {
-		f->range[0] = 1;
-		f->nrange++;
 	}
 	FT_Done_Face(face);
+
+	// libdraw expects U+0000 to be present
+	if(!f->range[0])
+		f->range[0] = 1;
+
+	// fix up file list
+	for(i=0; i<nelem(f->range); i++)
+		if(f->range[i])
+			f->file[f->nfile++] = i;
+
 	f->loaded = 1;
 }
 
@@ -176,7 +180,7 @@ mksubfont(XFont *xf, char *name, int lo, int hi, int size, int antialias)
 		e = 1;
 		k = FT_Get_Char_Index(face, i);
 		if(k != 0) {
-			e = FT_Load_Glyph(face, k, FT_LOAD_RENDER|FT_LOAD_NO_HINTING|(antialias ? 0:FT_LOAD_TARGET_MONO));
+			e = FT_Load_Glyph(face, k, FT_LOAD_RENDER|FT_LOAD_NO_AUTOHINT|(antialias ? 0:FT_LOAD_TARGET_MONO));
 		}
 		if(e || face->glyph->advance.x <= 0) {
 			fc->width = 0;

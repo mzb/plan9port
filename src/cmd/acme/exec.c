@@ -694,65 +694,6 @@ checksha1(char *name, File *f, Dir *d)
 	}
 }
 
-static void
-trimspaces(Text *et)
-{
-	File *f;
-	Rune *r;
-	Text *t;
-	uint q0, n, delstart;
-	int c, i, marked;
-
-	t = &et->w->body;
-	f = t->file;
-	marked = 0;
-
-	if(t->w!=nil && et->w!=t->w){
-		/* can this happen when t == &et->w->body? */
-		c = 'M';
-		if(et->w)
-			c = et->w->owner;
-		winlock(t->w, c);
-	}
-
-	r = fbufalloc();
-	q0 = f->b.nc;
-	delstart = q0; /* end of current space run, or 0 if no active run; = q0 to delete spaces before EOF */
-	while(q0 > 0) {
-		n = RBUFSIZE;
-		if(n > q0)
-			n = q0;
-		q0 -= n;
-		bufread(&f->b, q0, r, n);
-		for(i=n; ; i--) {
-			if(i == 0 || (r[i-1] != ' ' && r[i-1] != '\t')) {
-				// Found non-space or start of buffer. Delete active space run.
-				if(q0+i < delstart) {
-					if(!marked) {
-						marked = 1;
-						seq++;
-						filemark(f);
-					}
-					textdelete(t, q0+i, delstart, TRUE);
-				}
-				if(i == 0) {
-					/* keep run active into tail of next buffer */
-					if(delstart > 0)
-						delstart = q0;
-					break;
-				}
-				delstart = 0;
-				if(r[i-1] == '\n')
-					delstart = q0+i-1; /* delete spaces before this newline */
-			}
-		}
-	}
-	fbuffree(r);
-
-	if(t->w!=nil && et->w!=t->w)
-		winunlock(t->w);
-}
-
 void
 putfile(File *f, int q0, int q1, Rune *namer, int nname)
 {
@@ -760,7 +701,7 @@ putfile(File *f, int q0, int q1, Rune *namer, int nname)
 	Rune *r;
 	Biobuf *b;
 	char *s, *name;
-	int i, fd, q;
+	int i, fd, q, ret, retc;
 	Dir *d, *d1;
 	Window *w;
 	int isapp;
@@ -823,9 +764,14 @@ putfile(File *f, int q0, int q1, Rune *namer, int nname)
 		warning(nil, "can't write file %s: %r\n", name);
 		goto Rescue2;
 	}
-	Bterm(b);
+	ret = Bterm(b);
+	retc = close(fd);
 	free(b);
 	b = nil;
+	if(ret < 0 || retc < 0) {
+		warning(nil, "can't write file %s: %r\n", name);
+		goto Rescue2; // flush or close failed
+	}
 	if(runeeq(namer, nname, f->name, f->nname)){
 		if(q0!=0 || q1!=f->b.nc){
 			f->mod = TRUE;
@@ -842,10 +788,9 @@ putfile(File *f, int q0, int q1, Rune *namer, int nname)
 			// in case we don't have read permission.
 			// (The create above worked, so we probably
 			// still have write permission.)
-			close(fd);
 			fd = open(name, OWRITE);
-
 			d1 = dirfstat(fd);
+			close(fd);
 			if(d1 != nil){
 				free(d);
 				d = d1;
@@ -878,17 +823,76 @@ putfile(File *f, int q0, int q1, Rune *namer, int nname)
 	if(b != nil) {
 		Bterm(b);
 		free(b);
+		close(fd);
 	}
 	free(h);
 	fbuffree(s);
 	fbuffree(r);
-	close(fd);
 	/* fall through */
 
     Rescue1:
 	free(d);
 	free(namer);
 	free(name);
+}
+
+static void
+trimspaces(Text *et)
+{
+	File *f;
+	Rune *r;
+	Text *t;
+	uint q0, n, delstart;
+	int c, i, marked;
+
+	t = &et->w->body;
+	f = t->file;
+	marked = 0;
+
+	if(t->w!=nil && et->w!=t->w){
+		/* can this happen when t == &et->w->body? */
+		c = 'M';
+		if(et->w)
+			c = et->w->owner;
+		winlock(t->w, c);
+	}
+
+	r = fbufalloc();
+	q0 = f->b.nc;
+	delstart = q0; /* end of current space run, or 0 if no active run; = q0 to delete spaces before EOF */
+	while(q0 > 0) {
+		n = RBUFSIZE;
+		if(n > q0)
+			n = q0;
+		q0 -= n;
+		bufread(&f->b, q0, r, n);
+		for(i=n; ; i--) {
+			if(i == 0 || (r[i-1] != ' ' && r[i-1] != '\t')) {
+				// Found non-space or start of buffer. Delete active space run.
+				if(q0+i < delstart) {
+					if(!marked) {
+						marked = 1;
+						seq++;
+						filemark(f);
+					}
+					textdelete(t, q0+i, delstart, TRUE);
+				}
+				if(i == 0) {
+					/* keep run active into tail of next buffer */
+					if(delstart > 0)
+						delstart = q0;
+					break;
+				}
+				delstart = 0;
+				if(r[i-1] == '\n')
+					delstart = q0+i-1; /* delete spaces before this newline */
+			}
+		}
+	}
+	fbuffree(r);
+
+	if(t->w!=nil && et->w!=t->w)
+		winunlock(t->w);
 }
 
 void
